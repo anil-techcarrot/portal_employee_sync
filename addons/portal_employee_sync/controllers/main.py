@@ -6,101 +6,161 @@ import logging
 _logger = logging.getLogger(__name__)
 
 
-class PortalEmployeeController(http.Controller):
-    VALID_API_KEY = 'd7ce6e48fe7b6dd95283f5c36f6dd791aa83cf65'
+class PortalEmployeeSyncController(http.Controller):
 
-    @http.route('/api/employees',
-                type='http',
-                auth='public',
-                methods=['POST'],
-                csrf=False,
-                cors='*')
+    def _verify_api_key(self, api_key):
+        """Verify API key - Replace with your actual validation logic"""
+        # Change this to your actual API key
+        valid_key = "d7ce6e48fe7b6dd95283f5c36f6dd791aa83cf65"
+        return api_key == valid_key
+
+    @http.route('/api/employees', type='http', auth='public', methods=['POST'], csrf=False, cors='*')
     def create_employee(self, **kwargs):
-        """Create employee from portal"""
+        """Create employee from external system"""
         try:
-            _logger.info("=" * 70)
-            _logger.info(" API: Create Employee")
+            # Get API key from headers
+            api_key = request.httprequest.headers.get('api-key') or \
+                      request.httprequest.headers.get('API-Key') or \
+                      request.httprequest.headers.get('Authorization', '').replace('Bearer ', '')
 
-            # Validate API Key
-            api_key = request.httprequest.headers.get('API-Key')
-            if not api_key or api_key != self.VALID_API_KEY:
-                _logger.warning("Invalid API Key")
-                return self._json_response({'error': 'Invalid API Key', 'status': 401}, 401)
+            _logger.info(f"Received API Key: {api_key}")
 
-            # Parse data
+            if not api_key or not self._verify_api_key(api_key):
+                return self._json_response({
+                    'error': 'Invalid API key',
+                    'status': 401
+                }, 401)
+
+            # Parse JSON data from request body
             try:
                 if request.httprequest.data:
                     data = json.loads(request.httprequest.data.decode('utf-8'))
                 else:
                     data = request.httprequest.form.to_dict()
-                _logger.info(f" Data: {data}")
+                
+                _logger.info(f"Received employee data: {data}")
             except Exception as e:
-                return self._json_response({'error': f'Invalid JSON: {str(e)}', 'status': 400}, 400)
+                return self._json_response({
+                    'error': f'Invalid JSON: {str(e)}',
+                    'status': 400
+                }, 400)
 
-            # Validate required fields
+            # Validate required field
             if not data.get('name'):
-                return self._json_response({'error': 'Name required', 'status': 400}, 400)
-            if not data.get('email'):
-                return self._json_response({'error': 'Email required', 'status': 400}, 400)
+                return self._json_response({
+                    'error': 'Name required',
+                    'status': 400
+                }, 400)
 
-            # Get/create department
-            department_id = False
-            if data.get('department'):
-                department_id = self._get_or_create_department(data['department'])
+            # Create employee record
+            employee = request.env['hr.employee'].sudo().create({
+                'name': data.get('name'),
+                'work_email': data.get('email'),
+                'mobile_phone': data.get('phone'),
+                'department_id': self._get_or_create_department(data.get('department')),
+                'job_id': self._get_or_create_job(data.get('job_title')),
+            })
 
-            # Prepare employee data
-            employee_vals = {
-                'name': data['name'],
-                'work_email': data['email'],
-                'work_phone': data.get('phone', ''),
-                'department_id': department_id,
-            }
-
-            if 'employee_code' in request.env['hr.employee']._fields:
-                employee_vals['employee_code'] = data.get('employee_code', '')
-
-            if 'portal_sync_date' in request.env['hr.employee']._fields:
-                from odoo import fields
-                employee_vals['portal_sync_date'] = fields.Datetime.now()
-
-            # Create employee
-            employee = request.env['hr.employee'].sudo().create(employee_vals)
-
-            _logger.info("=" * 70)
-            _logger.info(f"CREATED: {employee.name} (ID: {employee.id})")
-            _logger.info("=" * 70)
+            _logger.info(f"Employee created successfully: {employee.name} (ID: {employee.id})")
 
             return self._json_response({
                 'success': True,
-                'id': employee.id,
-                'name': employee.name,
-                'email': employee.work_email,
-                'status': 200
+                'status': 'success',
+                'employee_id': employee.id,
+                'message': 'Employee created successfully',
+                'data': {
+                    'name': employee.name,
+                    'email': employee.work_email,
+                    'phone': employee.mobile_phone
+                }
             })
 
         except Exception as e:
-            _logger.error(f"Error: {str(e)}", exc_info=True)
-            return self._json_response({'error': str(e), 'status': 500}, 500)
+            _logger.error(f"Error creating employee: {str(e)}", exc_info=True)
+            return self._json_response({
+                'error': str(e),
+                'status': 500
+            }, 500)
 
-    def _get_or_create_department(self, department_name):
+    @http.route('/api/employees', type='http', auth='public', methods=['GET'], csrf=False, cors='*')
+    def get_employees(self, **kwargs):
+        """Get all employees"""
+        try:
+            # Get API key from headers
+            api_key = request.httprequest.headers.get('api-key') or \
+                      request.httprequest.headers.get('API-Key') or \
+                      request.httprequest.headers.get('Authorization', '').replace('Bearer ', '')
+
+            if not api_key or not self._verify_api_key(api_key):
+                return self._json_response({
+                    'error': 'Invalid API key',
+                    'status': 401
+                }, 401)
+
+            # Get all employees
+            employees = request.env['hr.employee'].sudo().search([])
+
+            employee_list = []
+            for emp in employees:
+                employee_list.append({
+                    'id': emp.id,
+                    'name': emp.name,
+                    'email': emp.work_email or '',
+                    'phone': emp.mobile_phone or '',
+                    'department': emp.department_id.name if emp.department_id else '',
+                    'job_title': emp.job_id.name if emp.job_id else '',
+                })
+
+            return self._json_response({
+                'success': True,
+                'status': 'success',
+                'count': len(employee_list),
+                'employees': employee_list
+            })
+
+        except Exception as e:
+            _logger.error(f"Error fetching employees: {str(e)}")
+            return self._json_response({
+                'error': str(e),
+                'status': 500
+            }, 500)
+
+    def _get_or_create_department(self, dept_name):
         """Get or create department"""
-        if not department_name:
+        if not dept_name:
             return False
 
         department = request.env['hr.department'].sudo().search([
-            ('name', '=', department_name)
+            ('name', '=', dept_name)
         ], limit=1)
 
         if not department:
             department = request.env['hr.department'].sudo().create({
-                'name': department_name
+                'name': dept_name
             })
-            _logger.info(f" Created department: {department_name}")
+            _logger.info(f"Created new department: {dept_name}")
 
         return department.id
 
+    def _get_or_create_job(self, job_title):
+        """Get or create job position"""
+        if not job_title:
+            return False
+
+        job = request.env['hr.job'].sudo().search([
+            ('name', '=', job_title)
+        ], limit=1)
+
+        if not job:
+            job = request.env['hr.job'].sudo().create({
+                'name': job_title
+            })
+            _logger.info(f"Created new job: {job_title}")
+
+        return job.id
+
     def _json_response(self, data, status=200):
-        """Return JSON response"""
+        """Return JSON response with proper headers"""
         return request.make_response(
             json.dumps(data),
             headers=[
@@ -109,18 +169,3 @@ class PortalEmployeeController(http.Controller):
             ],
             status=status
         )
-
-    @http.route('/api/employees/test',
-                type='http',
-                auth='public',
-                methods=['GET'],
-                csrf=False)
-    def test_endpoint(self, **kwargs):
-        """Test API endpoint"""
-        return self._json_response({
-            'status': 'OK',
-            'message': 'API is working!',
-            'endpoint': '/api/employees',
-            'method': 'POST',
-            'required_fields': ['name', 'email']
-        })
