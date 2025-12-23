@@ -9,7 +9,6 @@ _logger = logging.getLogger(__name__)
 class HREmployee(models.Model):
     _inherit = 'hr.employee'
 
-    # Field definitions - these will create database columns
     azure_email = fields.Char("Azure Email", readonly=True)
     azure_user_id = fields.Char("Azure User ID", readonly=True)
     azure_license_assigned = fields.Boolean("License Assigned", default=False, readonly=True)
@@ -17,19 +16,19 @@ class HREmployee(models.Model):
 
     @api.model
     def create(self, vals):
-        """Automatically runs when Power Automate creates employee from SharePoint"""
+        """Automatically runs when employee is created"""
         emp = super(HREmployee, self).create(vals)
 
         if emp.name:
-            # Step 1: Create Azure email
+            # Step 1: Create Azure user
             emp._create_azure_email()
 
-            # Step 2: Assign license (only if email was created successfully)
+            # Step 2: Assign license (check if not already assigned)
             if emp.azure_user_id:
-                emp.assign_azure_license()
+                emp._check_and_assign_license()
 
-            # Step 3: Add to department DL (only if user exists)
-            if emp.department_id and emp.azure_user_id:
+            # Step 3: Add to department DL (check if not already member)
+            if emp.department_id and emp.azure_user_id and emp.department_id.azure_dl_id:
                 emp._add_to_dept_dl()
 
         return emp
@@ -44,7 +43,7 @@ class HREmployee(models.Model):
         domain = IrConfig.get_param("azure_domain")
 
         if not all([tenant_id, client_id, client_secret, domain]):
-            _logger.error("❌ Azure credentials missing in System Parameters!")
+            _logger.error("❌ Azure credentials missing!")
             return
 
         try:
@@ -93,7 +92,7 @@ class HREmployee(models.Model):
                 elif check.status_code == 200:
                     count += 1
                     unique_email = f"{base}{count}@{domain}"
-                    _logger.info(f"🔄 Email exists, trying: {unique_email}")
+                    _logger.info(f"🔄 Trying: {unique_email}")
                 else:
                     _logger.error(f"❌ Error checking email: {check.status_code}")
                     return
@@ -126,18 +125,18 @@ class HREmployee(models.Model):
                     'work_email': unique_email,
                     'azure_user_id': user_data.get("id")
                 })
-                _logger.info(f"✅ SUCCESS! Created: {unique_email} with ID: {self.azure_user_id}")
+                _logger.info(f"✅ Created: {unique_email} | ID: {self.azure_user_id}")
             else:
-                error = create_response.json().get('error', {}).get('message', 'Unknown error')
+                error = create_response.json().get('error', {}).get('message', 'Unknown')
                 _logger.error(f"❌ Failed to create user: {error}")
 
         except Exception as e:
-            _logger.error(f"❌ Exception in _create_azure_email: {str(e)}")
+            _logger.error(f"❌ Exception: {str(e)}")
 
-    def assign_azure_license(self):
-        """Assign Microsoft 365 license to user"""
+    def _check_and_assign_license(self):
+        """Check if license already assigned, then assign if needed"""
         if not self.azure_user_id:
-            _logger.error(f"❌ Cannot assign license: No Azure User ID for {self.name}")
+            _logger.error(f"❌ No Azure User ID for {self.name}")
             return False
 
         params = self.env['ir.config_parameter'].sudo()
@@ -147,11 +146,11 @@ class HREmployee(models.Model):
         license_sku = params.get_param("azure_license_sku")
 
         if not license_sku:
-            _logger.warning("⚠️ No license SKU configured. Skipping license assignment.")
+            _logger.warning("⚠️ No license SKU configured")
             return False
 
         try:
-            # Get access token
+            # Get token
             token_resp = requests.post(
                 f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
                 data={
@@ -165,7 +164,7 @@ class HREmployee(models.Model):
 
             token = token_resp.get("access_token")
             if not token:
-                _logger.error("❌ Failed to get access token for license assignment")
+                _logger.error("❌ No token for license check")
                 return False
 
             headers = {
@@ -173,7 +172,26 @@ class HREmployee(models.Model):
                 "Content-Type": "application/json"
             }
 
-            # Assign license
+            # STEP 1: Check if user already has license in Azure
+            check_url = f"https://graph.microsoft.com/v1.0/users/{self.azure_user_id}/licenseDetails"
+            check_response = requests.get(check_url, headers=headers, timeout=30)
+
+            if check_response.status_code == 200:
+                existing_licenses = check_response.json().get('value', [])
+                for lic in existing_licenses:
+                    if lic.get('skuId') == license_sku:
+                        # License already exists in Azure
+                        license_name = lic.get('skuPartNumber', 'Microsoft 365')
+                        self.write({
+                            'azure_license_assigned': True,
+                            'azure_license_name': license_name
+                        })
+                        _logger.info(f"ℹ️ {self.name} already has license: {license_name}")
+                        return True
+
+            # STEP 2: License not found, assign it
+            _logger.info(f"🔄 Assigning license to {self.name}...")
+
             license_payload = {
                 "addLicenses": [{
                     "skuId": license_sku,
@@ -209,76 +227,114 @@ class HREmployee(models.Model):
                     'azure_license_assigned': True,
                     'azure_license_name': license_name
                 })
-                _logger.info(f"✅ License '{license_name}' assigned to {self.name}")
+                _logger.info(f"✅ License assigned: {license_name}")
                 return True
             else:
-                error = license_response.json().get('error', {}).get('message', 'Unknown')
-                _logger.error(f"❌ Failed to assign license: {error}")
+                error_data = license_response.json().get('error', {})
+                error_msg = error_data.get('message', 'Unknown')
+
+                # Handle "already assigned" error
+                if 'already' in error_msg.lower():
+                    _logger.info(f"ℹ️ License already assigned (Azure reported)")
+                    self.write({'azure_license_assigned': True})
+                    return True
+
+                _logger.error(f"❌ License assignment failed: {error_msg}")
                 return False
 
         except Exception as e:
-            _logger.error(f"❌ License assignment failed: {e}")
+            _logger.error(f"❌ License check failed: {e}")
             return False
 
     def _add_to_dept_dl(self):
-        """Add employee to department DL"""
+        """Add employee to department DL - CHECK IF ALREADY MEMBER"""
         if not self.department_id or not self.azure_user_id:
-            _logger.warning(f"⚠️ Skipping DL: dept={self.department_id}, user_id={self.azure_user_id}")
+            _logger.warning(f"⚠️ Missing dept or user_id for {self.name}")
             return
 
         dept = self.department_id
 
-        # Create DL if doesn't exist
+        # Check if department has DL configured
         if not dept.azure_dl_id:
-            _logger.info(f"🔄 Department {dept.name} has no DL, creating...")
-            dept.create_dl()
+            _logger.warning(f"⚠️ Department '{dept.name}' has no DL configured")
+            # Try to sync DL automatically
+            dept.action_sync_dl_from_azure()
 
-        if dept.azure_dl_id:
-            try:
-                params = self.env['ir.config_parameter'].sudo()
-                tenant = params.get_param("azure_tenant_id")
-                client = params.get_param("azure_client_id")
-                secret = params.get_param("azure_client_secret")
+            # Check again after sync
+            if not dept.azure_dl_id:
+                _logger.error(f"❌ Cannot add {self.name} to DL - no DL found for {dept.name}")
+                return
 
-                token_resp = requests.post(
-                    f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
-                    data={
-                        "grant_type": "client_credentials",
-                        "client_id": client,
-                        "client_secret": secret,
-                        "scope": "https://graph.microsoft.com/.default"
-                    },
-                    timeout=30
-                ).json()
+        try:
+            params = self.env['ir.config_parameter'].sudo()
+            tenant = params.get_param("azure_tenant_id")
+            client = params.get_param("azure_client_id")
+            secret = params.get_param("azure_client_secret")
 
-                token = token_resp.get("access_token")
-                headers = {
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json"
-                }
+            token_resp = requests.post(
+                f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
+                data={
+                    "grant_type": "client_credentials",
+                    "client_id": client,
+                    "client_secret": secret,
+                    "scope": "https://graph.microsoft.com/.default"
+                },
+                timeout=30
+            ).json()
 
-                add_response = requests.post(
-                    f"https://graph.microsoft.com/v1.0/groups/{dept.azure_dl_id}/members/$ref",
-                    headers=headers,
-                    json={"@odata.id": f"https://graph.microsoft.com/v1.0/users/{self.azure_user_id}"},
-                    timeout=30
-                )
+            token = token_resp.get("access_token")
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json"
+            }
 
-                if add_response.status_code == 204:
-                    _logger.info(f"✅ Added {self.name} to {dept.azure_dl_email}")
-                elif add_response.status_code == 400:
-                    _logger.info(f"ℹ️ {self.name} already in {dept.azure_dl_email}")
+            # STEP 1: Check if user is already a member
+            check_url = f"https://graph.microsoft.com/v1.0/groups/{dept.azure_dl_id}/members/{self.azure_user_id}"
+            check_response = requests.get(check_url, headers=headers, timeout=30)
+
+            if check_response.status_code == 200:
+                _logger.info(f"ℹ️ {self.name} already in {dept.azure_dl_email}")
+                return
+
+            # STEP 2: Not a member, add them
+            add_response = requests.post(
+                f"https://graph.microsoft.com/v1.0/groups/{dept.azure_dl_id}/members/$ref",
+                headers=headers,
+                json={"@odata.id": f"https://graph.microsoft.com/v1.0/users/{self.azure_user_id}"},
+                timeout=30
+            )
+
+            if add_response.status_code == 204:
+                _logger.info(f"✅ Added {self.name} to {dept.azure_dl_email}")
+            elif add_response.status_code == 400:
+                error = add_response.json().get('error', {})
+                if 'already exist' in error.get('message', '').lower():
+                    _logger.info(f"ℹ️ {self.name} already in {dept.azure_dl_email} (Azure confirmed)")
                 else:
-                    _logger.error(f"❌ Failed to add to DL: {add_response.status_code}")
+                    _logger.error(f"❌ Failed to add: {error.get('message', 'Unknown')}")
+            else:
+                _logger.error(f"❌ Failed to add to DL: HTTP {add_response.status_code}")
 
-            except Exception as e:
-                _logger.error(f"❌ Failed to add to DL: {e}")
+        except Exception as e:
+            _logger.error(f"❌ DL addition failed: {e}")
 
     def action_view_azure_user(self):
-        """Open Azure AD user page in browser"""
+        """Open Azure AD user page"""
         if self.azure_user_id:
             return {
                 'type': 'ir.actions.act_url',
                 'url': f'https://portal.azure.com/#view/Microsoft_AAD_UsersAndTenants/UserProfileMenuBlade/~/overview/userId/{self.azure_user_id}',
                 'target': 'new',
             }
+
+    def action_assign_license_manual(self):
+        """Manual button to assign license"""
+        self._check_and_assign_license()
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'message': 'License assignment completed. Check logs for details.',
+                'type': 'success',
+            }
+        }
