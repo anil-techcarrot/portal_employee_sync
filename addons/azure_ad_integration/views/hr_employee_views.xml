@@ -10,39 +10,38 @@
             <!-- Azure AD Info Tab -->
             <xpath expr="//notebook" position="inside">
                 <page string="Azure AD Info" name="azure_ad_info">
-
                     <group>
-                        <group string="Azure Account Details">
+                        <group string="Azure Account">
                             <field name="azure_email" readonly="1"/>
                             <field name="azure_user_id" readonly="1"/>
                         </group>
-                        <group string="License Information">
-                            <field name="azure_license_assigned" readonly="1"/>
+                        <group string="License Info">
+                            <field name="azure_license_assigned" readonly="1" widget="boolean"/>
                             <field name="azure_license_name" readonly="1"
-                                   attrs="{'invisible': [('azure_license_assigned', '=', False)]}"/>
+                                   invisible="azure_license_assigned == False"/>
                         </group>
                     </group>
 
-                    <!-- License Management Buttons -->
-                    <div class="oe_button_box" name="license_button_box">
+                    <!-- License Management -->
+                    <group string="License Management">
+                        <!-- Unassign Button (shows when license exists) -->
                         <button name="action_unassign_license"
                                 type="object"
                                 string="Unassign License"
-                                class="oe_stat_button"
+                                class="btn-warning"
                                 icon="fa-minus-circle"
-                                confirm="Are you sure you want to remove the license from this employee?"
-                                attrs="{'invisible': [('azure_license_assigned', '=', False)]}"/>
-                    </div>
+                                confirm="Remove license from this employee?"
+                                invisible="azure_license_assigned == False"/>
+                    </group>
 
-                    <!-- Quick Actions -->
-                    <div class="oe_button_box" name="quick_actions_box">
+                    <group string="Quick Actions">
                         <button name="action_view_azure_user"
                                 type="object"
                                 string="View in Azure Portal"
-                                class="oe_stat_button"
+                                class="btn-primary"
                                 icon="fa-external-link"
-                                attrs="{'invisible': [('azure_user_id', '=', False)]}"/>
-                    </div>
+                                invisible="azure_user_id == False"/>
+                    </group>
                 </page>
             </xpath>
 
@@ -57,7 +56,7 @@
         <field name="arch" type="xml">
             <xpath expr="//field[@name='work_email']" position="after">
                 <field name="azure_email" optional="show"/>
-                <field name="azure_license_assigned" optional="show"/>
+                <field name="azure_license_assigned" optional="show" widget="boolean"/>
                 <field name="azure_license_name" optional="hide"/>
             </xpath>
         </field>
