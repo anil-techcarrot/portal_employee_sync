@@ -10,13 +10,20 @@
             <!-- Azure AD Info Tab -->
             <xpath expr="//notebook" position="inside">
                 <page string="Azure AD Info" name="azure_ad_info">
+
+                    <!-- IMPORTANT: Load all fields first in a hidden group -->
+                    <group invisible="1">
+                        <field name="azure_license_assigned"/>
+                        <field name="azure_user_id"/>
+                    </group>
+
                     <group>
                         <group string="Azure Account Details">
                             <field name="azure_email" readonly="1"/>
-                            <field name="azure_user_id" readonly="1"/>
+                            <field name="azure_user_id" readonly="1" force_save="1"/>
                         </group>
                         <group string="License Information">
-                            <field name="azure_license_assigned" readonly="1"/>
+                            <field name="azure_license_assigned" readonly="1" force_save="1"/>
                             <field name="azure_license_name" readonly="1"
                                    invisible="not azure_license_assigned"/>
                         </group>
@@ -24,7 +31,6 @@
 
                     <!-- License Management -->
                     <group string="License Management">
-                        <!-- Unassign Button (shows ONLY when license is assigned) -->
                         <button name="action_unassign_license"
                                 type="object"
                                 string="Unassign License"
@@ -34,6 +40,7 @@
                                 invisible="not azure_license_assigned"/>
                     </group>
 
+                    <!-- Quick Actions -->
                     <group string="Quick Actions">
                         <button name="action_view_azure_user"
                                 type="object"
